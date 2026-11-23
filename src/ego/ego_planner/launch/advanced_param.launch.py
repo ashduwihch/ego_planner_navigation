@@ -194,7 +194,7 @@ def generate_launch_description():
             {'grid_map/max_ray_length': 4.5},
             
             {'grid_map/virtual_ceil_height': 2.9},
-            {'grid_map/visualization_truncate_height': 1.8},
+            {'grid_map/visualization_truncate_height': 2.8},
             {'grid_map/show_occ_time': False},
             {'grid_map/pose_type': 2},
             {'grid_map/frame_id': planning_frame},

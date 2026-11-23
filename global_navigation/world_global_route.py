@@ -33,9 +33,11 @@ EGO_MIN = np.array([-39.5, -39.5, 0.10])
 EGO_MAX = np.array([39.5, 39.5, 2.65])
 BLOCKED_REPLAN_DELAY = 2.0
 GOAL_PROGRESS_STEP = 0.15
+GOAL_ARRIVAL_TOLERANCE_M = 0.20
 STALLED_SPEED = 0.15
 MAX_NO_PROGRESS_TIME = 6.0
 MAX_EXPANDED_VOXELS = 300_000
+MAX_SEARCH_SECONDS = 10.0
 
 
 def should_replan_blocked_route(now, blocked_since, last_progress,
@@ -55,6 +57,7 @@ def explain_route_error(error):
         'goal is outside EGO planning bounds': '终点超出 EGO 地图范围',
         'start is outside EGO planning bounds': '当前位置超出 EGO 地图范围',
         'no global route through the known free space': '当前地图中找不到可通行路线',
+        'global search exceeded time budget': '全局路线搜索超过 10 秒，当前地图中未及时找到安全路线',
     }
     return explanations.get(str(error), str(error))
 
@@ -201,6 +204,13 @@ class StaticGrid:
                 not self.live_blocked(point) and
                 self.static_clearance_sq(point) > REQUIRED_CLEARANCE ** 2)
 
+    def goal_free(self, point):
+        """Certify a goal even if arrival is declared within its tolerance."""
+        return (self.index(point) is not None and
+                not self.live_blocked(point) and
+                self.static_clearance_sq(point) >
+                (REQUIRED_CLEARANCE + GOAL_ARRIVAL_TOLERANCE_M) ** 2)
+
     def replace_live_occupancy(self, lidar_points, world_to_lidar):
         points = np.asarray(lidar_points, dtype=float)
         self.live_world_to_lidar = np.array(world_to_lidar, copy=True)
@@ -266,14 +276,17 @@ class StaticGrid:
             times = np.where(step != 0,
                              (next_boundary - start) / delta, np.inf)
             increments = np.where(step != 0, 1.0 / np.abs(delta), np.inf)
-        while True:
+        for _ in range(int(np.abs(target - current).sum()) + 1):
             if self.live_blocked_index(current):
                 return True
             if np.array_equal(current, target):
                 return False
-            axis = int(np.argmin(times))
+            # Once an axis reaches the end voxel, stepping it again can
+            # overshoot and make the traversal run forever at boundary ties.
+            axis = int(np.argmin(np.where(current != target, times, np.inf)))
             current[axis] += step[axis]
             times[axis] += increments[axis]
+        raise RuntimeError('voxel traversal did not reach its end cell')
 
     def first_line_obstruction(self, start, end, world_to_lidar=None,
                                check_live=True):
@@ -338,6 +351,7 @@ class StaticGrid:
 
     def route(self, start, goal, world_to_lidar=None):
         started = time.perf_counter()
+        deadline = started + MAX_SEARCH_SECONDS
         self.last_route_stats = None
         start, goal = np.asarray(start, dtype=float), np.asarray(goal, dtype=float)
         if world_to_lidar is not None:
@@ -353,16 +367,26 @@ class StaticGrid:
                                      'resolution': None}
             return [start, goal]
         total_expanded = 0
-        for pitch in (COARSE_RESOLUTION, RESOLUTION):
-            route, count = self.search_route(start, goal, pitch, world_to_lidar)
-            total_expanded += count
-            if route is not None:
-                if pitch != RESOLUTION:
-                    route = self.refine_route(route, world_to_lidar)
-                self.last_route_stats = {'seconds': time.perf_counter() - started,
-                                         'expanded': total_expanded, 'direct': False,
-                                         'resolution': pitch}
-                return route
+        margin = 2 * COARSE_RESOLUTION
+        while True:
+            if time.perf_counter() >= deadline:
+                raise ValueError('global search exceeded time budget')
+            lower = np.maximum(LOWER, np.minimum(start, goal) - margin)
+            upper = np.minimum(UPPER, np.maximum(start, goal) + margin)
+            for pitch in (COARSE_RESOLUTION, RESOLUTION):
+                route, count = self.search_route(
+                    start, goal, pitch, world_to_lidar, (lower, upper), deadline)
+                total_expanded += count
+                if route is not None:
+                    if pitch != RESOLUTION:
+                        route = self.refine_route(route, world_to_lidar)
+                    self.last_route_stats = {'seconds': time.perf_counter() - started,
+                                             'expanded': total_expanded, 'direct': False,
+                                             'resolution': pitch}
+                    return route
+            if np.array_equal(lower, LOWER) and np.array_equal(upper, UPPER):
+                break
+            margin *= 2
         raise ValueError('no global route through the known free space')
 
     def refine_route(self, route, world_to_lidar=None):
@@ -405,13 +429,44 @@ class StaticGrid:
             result[i] = current
         return result
 
-    def search_route(self, start, goal, pitch, world_to_lidar=None):
-        """Search a six-connected grid, checking every traversed edge."""
+    def search_route(self, start, goal, pitch, world_to_lidar=None,
+                     bounds=None, deadline=None):
+        """Search a six-connected grid inside a gradually expanded local region."""
         s, g = self.search_index(start, pitch), self.search_index(goal, pitch)
         if s == g:
             return None, 0
         shape = self._search_shapes[pitch]
+        if bounds is None:
+            low = np.zeros(3, dtype=int)
+            high = shape - 1
+        else:
+            origin = self.search_origin(pitch)
+            low = np.maximum(0, np.floor((bounds[0] - origin) / pitch).astype(int))
+            high = np.minimum(shape - 1,
+                              np.floor((bounds[1] - origin) / pitch).astype(int))
         delta = ((1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1))
+        # A lattice route must have an edge leaving the actual start and an
+        # edge entering the actual goal. A safe continuous goal can lie in a
+        # coarse cell whose neighbouring lattice centres are all blocked.
+        def connected_endpoint(cell, other, point, leaving):
+            for step in delta:
+                neighbor = tuple(cell[i] + step[i] for i in range(3))
+                if (neighbor == other or
+                        any(neighbor[i] < 0 or neighbor[i] >= shape[i]
+                            for i in range(3)) or
+                        not self.search_free(neighbor, pitch)):
+                    continue
+                centre = self.search_center(neighbor, pitch)
+                edge_is_free = (self.edge_free(point, centre, world_to_lidar)
+                                if leaving else
+                                self.edge_free(centre, point, world_to_lidar))
+                if edge_is_free:
+                    return True
+            return False
+
+        if (not connected_endpoint(s, g, start, True) or
+                not connected_endpoint(g, s, goal, False)):
+            return None, 0
         # Manhattan distance is admissible for six-connected search.
         def heuristic(a): return sum(abs(a[i] - g[i]) for i in range(3)) * pitch
         queue = [(heuristic(s), -0.0, s)]
@@ -419,6 +474,8 @@ class StaticGrid:
         parent = {}
         count = 0
         while queue:
+            if deadline is not None and time.perf_counter() >= deadline:
+                raise ValueError('global search exceeded time budget')
             _, negative_cost, node = heapq.heappop(queue)
             cost = -negative_cost
             if cost > best[node] + 1e-8: continue
@@ -430,7 +487,7 @@ class StaticGrid:
                 return None, count
             for step in delta:
                 nxt = tuple(node[i] + step[i] for i in range(3))
-                if any(nxt[i] < 0 or nxt[i] >= shape[i] for i in range(3)):
+                if any(nxt[i] < low[i] or nxt[i] > high[i] for i in range(3)):
                     continue
                 if nxt != g and not self.search_free(nxt, pitch):
                     continue
@@ -834,7 +891,14 @@ def ros_node(grid):
                 except ValueError as error:
                     self.show_selected_goal('REJECTED')
                     self.clear_handoff_checks()
-                    self.report(f'选点不可达：{explain_route_error(error)}')
+                    detail = ''
+                    if str(error) == 'current position is outside free global space':
+                        clearance = math.sqrt(self.grid.static_clearance_sq(current_world))
+                        detail = (f'；当前位置 ({current_world[0]:.2f}, '
+                                  f'{current_world[1]:.2f}, {current_world[2]:.2f})，'
+                                  f'静态距离 {clearance:.3f} m / 要求 {REQUIRED_CLEARANCE:.3f} m，'
+                                  f'实时地图占据：{"是" if self.grid.live_blocked(current_world) else "否"}')
+                    self.report(f'选点不可达：{explain_route_error(error)}{detail}')
                     self.pending_goal = None
                     return
                 self.pending_goal = None
@@ -916,7 +980,7 @@ def ros_node(grid):
             if not self.next_sent:
                 self.send_next()
                 return
-            if np.linalg.norm(current_world-self.route_points[self.next_index]) < .20:
+            if np.linalg.norm(current_world-self.route_points[self.next_index]) < GOAL_ARRIVAL_TOLERANCE_M:
                 self.next_index += 1
                 self.next_sent = False
                 if self.next_index == len(self.route_points):
