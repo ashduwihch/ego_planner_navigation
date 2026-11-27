@@ -1,7 +1,0 @@
-<library path="inspection_3d_goal_tool">
-  <class name="inspection_3d_goal_tool/Goal3DTool"
-         type="inspection_3d_goal_tool::Goal3DTool"
-         base_class_type="rviz_common::Tool">
-    <description>Set an EGO-Planner goal at a chosen 3D height.</description>
-  </class>
-</library>

@@ -3,10 +3,10 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node, SetRemap
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -16,10 +16,19 @@ def generate_launch_description():
         'drone_id': '0',
         'map_size_x': '80.0',
         'map_size_y': '80.0',
-        'map_size_z': '4.0',
+        'map_size_z': '10.5',
         'odom_topic': '/fastlio2/lio_odom',
-        'cloud_topic': '/inspection/ego_cloud',
-        'depth_topic': '/depth_camera_bestef',
+        'cloud_topic': '/fastlio2/world_cloud',
+        'wait_for_stable_px4': 'false',
+        'max_vel': '1.0',
+        'max_acc': '1.0',
+        'max_jerk': '3.0',
+        'lambda_smooth': '2.0',
+        'planning_horizon': '7.5',
+        'obstacle_inflation': '0.45',
+        'collision_clearance': '0.65',
+        'min_flight_height': '0.25',
+        'goal_tolerance': '0.20',
     }
     cfg = {name: LaunchConfiguration(name) for name in args}
     advanced = IncludeLaunchDescription(
@@ -34,34 +43,30 @@ def generate_launch_description():
             'map_size_z_': cfg['map_size_z'],
             'odometry_topic': cfg['odom_topic'],
             'cloud_topic': cfg['cloud_topic'],
-            'depth_topic': cfg['depth_topic'],
-            # Keep enough stopping margin for the PX4 SITL position loop.
-            'max_vel': '0.6',
-            'max_acc': '0.8',
-            'planning_horizon': '7.5',
-            'obstacle_inflation': '0.45',
-            'collision_clearance': '0.65',
+            'wait_for_stable_px4': cfg['wait_for_stable_px4'],
+            'max_vel': cfg['max_vel'],
+            'max_acc': cfg['max_acc'],
+            'max_jerk': cfg['max_jerk'],
+            'lambda_smooth': cfg['lambda_smooth'],
+            'planning_horizon': cfg['planning_horizon'],
+            'obstacle_inflation': cfg['obstacle_inflation'],
+            'collision_clearance': cfg['collision_clearance'],
+            'min_flight_height': cfg['min_flight_height'],
+            'goal_tolerance': cfg['goal_tolerance'],
             'use_distinctive_trajs': 'True',
             'flight_type': '1',
         }.items(),
     )
     return LaunchDescription([
         *[DeclareLaunchArgument(name, default_value=value) for name, value in args.items()],
-        # Manual/RViz goals pass through the static-world global route first.
-        # Only this Gazebo launch remaps EGO's final goal input.
-        GroupAction(actions=[
-            SetRemap(src='/goal_pose', dst='/inspection/ego_goal'),
-            advanced,
-        ]),
-        # FAST-LIO publishes lidar -> body. The physical MID-360 is mounted
-        # 0.08 m above base_link at yaw pi, but its plugin applies output_yaw=pi
-        # to both ROS cloud and IMU. Thus the published body frame has the
-        # same heading as base_link; applying yaw pi here would flip the map.
+        advanced,
+        # FAST-LIO publishes lidar -> body. The simulated IMU is the body frame,
+        # mounted 0.08 m above base_link and rotated pi about its z axis.
         Node(
             package='tf2_ros', executable='static_transform_publisher',
             name='mid360_body_to_base_link',
             arguments=['--x', '0', '--y', '0', '--z', '-0.08',
-                       '--yaw', '0', '--pitch', '0', '--roll', '0',
+                       '--yaw', '3.141592653589793', '--pitch', '0', '--roll', '0',
                        '--frame-id', 'body', '--child-frame-id', 'base_link'],
             parameters=[{'use_sim_time': cfg['use_sim_time']}],
         ),
@@ -79,8 +84,8 @@ def generate_launch_description():
                 ('planning/bspline', ['drone_', cfg['drone_id'], '_planning/bspline']),
             ],
             parameters=[{'traj_server/time_forward': 1.0,
-                         'traj_server/hold_current_yaw': True,
-                         'traj_server/odometry_topic': cfg['odom_topic'],
+                         # The MID-360/IMU axes are pi radians from base_link.
+                         'traj_server/initial_yaw': 3.141592653589793,
                          'use_sim_time': cfg['use_sim_time'],
                          'planning_frame': cfg['planning_frame']}],
         ),

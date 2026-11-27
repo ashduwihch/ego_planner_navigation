@@ -1,4 +1,3 @@
-import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -7,26 +6,23 @@ from launch_ros.actions import Node
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time", default="false")
     planning_frame = LaunchConfiguration("planning_frame", default="world")
+    wait_for_stable_px4 = LaunchConfiguration('wait_for_stable_px4', default='false')
     # LaunchConfigurations
     map_size_x = LaunchConfiguration('map_size_x_', default=80.0)
     map_size_y = LaunchConfiguration('map_size_y_', default=80.0)
-    map_size_z = LaunchConfiguration('map_size_z_', default=4.0)
+    map_size_z = LaunchConfiguration('map_size_z_', default=10.5)
     
     odometry_topic = LaunchConfiguration('odometry_topic', default='odom')
-    camera_pose_topic = LaunchConfiguration('camera_pose_topic', default='camera_pose')
-    depth_topic = LaunchConfiguration('depth_topic', default='depth_image')
     cloud_topic = LaunchConfiguration('cloud_topic', default='cloud')
-    
-    cx = LaunchConfiguration('cx', default=321.04638671875)
-    cy = LaunchConfiguration('cy', default=243.44969177246094)
-    fx = LaunchConfiguration('fx', default=387.229248046875)
-    fy = LaunchConfiguration('fy', default=387.229248046875)
-    
     max_vel = LaunchConfiguration('max_vel', default=2.0)
     max_acc = LaunchConfiguration('max_acc', default=3.0)
+    max_jerk = LaunchConfiguration('max_jerk', default=4.0)
+    lambda_smooth = LaunchConfiguration('lambda_smooth', default=2.0)
     planning_horizon = LaunchConfiguration('planning_horizon', default=7.5)
     obstacle_inflation = LaunchConfiguration('obstacle_inflation', default=0.45)
     collision_clearance = LaunchConfiguration('collision_clearance', default=0.65)
+    min_flight_height = LaunchConfiguration('min_flight_height', default=0.25)
+    goal_tolerance = LaunchConfiguration('goal_tolerance', default=0.20)
     
     point_num = LaunchConfiguration('point_num', default=1)
     point0_x = LaunchConfiguration('point0_x', default=0.0)
@@ -48,8 +44,6 @@ def generate_launch_description():
     flight_type = LaunchConfiguration('flight_type', default=2)
     use_distinctive_trajs = LaunchConfiguration('use_distinctive_trajs', default=True)
     
-    obj_num_set = LaunchConfiguration('obj_num_set', default=10)
-    
     drone_id = LaunchConfiguration('drone_id', default=0)
 
     # DeclareLaunchArguments
@@ -57,15 +51,12 @@ def generate_launch_description():
     map_size_y_arg = DeclareLaunchArgument('map_size_y_', default_value=map_size_y, description='Map size along Y')
     map_size_z_arg = DeclareLaunchArgument('map_size_z_', default_value=map_size_z, description='Map size along Z')
     odometry_topic_arg = DeclareLaunchArgument('odometry_topic', default_value=odometry_topic, description='Odometry topic')
-    camera_pose_topic_arg = DeclareLaunchArgument('camera_pose_topic', default_value=camera_pose_topic, description='Camera pose topic')
-    depth_topic_arg = DeclareLaunchArgument('depth_topic', default_value=depth_topic, description='Depth topic')
     cloud_topic_arg = DeclareLaunchArgument('cloud_topic', default_value=cloud_topic, description='Point cloud topic')
-    cx_arg = DeclareLaunchArgument('cx', default_value=cx, description='Camera intrinsic cx')
-    cy_arg = DeclareLaunchArgument('cy', default_value=cy, description='Camera intrinsic cy')
-    fx_arg = DeclareLaunchArgument('fx', default_value=fx, description='Camera intrinsic fx')
-    fy_arg = DeclareLaunchArgument('fy', default_value=fy, description='Camera intrinsic fy')
     max_vel_arg = DeclareLaunchArgument('max_vel', default_value=max_vel, description='Maximum velocity')
     max_acc_arg = DeclareLaunchArgument('max_acc', default_value=max_acc, description='Maximum acceleration')
+    max_jerk_arg = DeclareLaunchArgument('max_jerk', default_value=max_jerk, description='Maximum jerk')
+    lambda_smooth_arg = DeclareLaunchArgument(
+        'lambda_smooth', default_value=lambda_smooth, description='B-spline jerk smoothness weight')
     planning_horizon_arg = DeclareLaunchArgument('planning_horizon', default_value=planning_horizon, description='Planning horizon')
     obstacle_inflation_arg = DeclareLaunchArgument(
         'obstacle_inflation', default_value=obstacle_inflation,
@@ -73,6 +64,12 @@ def generate_launch_description():
     collision_clearance_arg = DeclareLaunchArgument(
         'collision_clearance', default_value=collision_clearance,
         description='Optimizer collision clearance in metres')
+    min_flight_height_arg = DeclareLaunchArgument(
+        'min_flight_height', default_value=min_flight_height,
+        description='Minimum planning-frame flight height above FAST-LIO origin')
+    goal_tolerance_arg = DeclareLaunchArgument(
+        'goal_tolerance', default_value=goal_tolerance,
+        description='Position tolerance for completing an EGO goal')
     
     point_num_arg = DeclareLaunchArgument('point_num', default_value=point_num, description='Number of waypoints')
     point0_x_arg = DeclareLaunchArgument('point0_x', default_value=point0_x, description='Waypoint 0 X coordinate')
@@ -93,7 +90,6 @@ def generate_launch_description():
     
     flight_type_arg = DeclareLaunchArgument('flight_type', default_value=flight_type, description='flight_type')
     use_distinctive_trajs_arg = DeclareLaunchArgument('use_distinctive_trajs', default_value=use_distinctive_trajs, description='Use distinctive trajectories')
-    obj_num_set_arg = DeclareLaunchArgument('obj_num_set', default_value=obj_num_set, description='Number of objects')
     drone_id_arg = DeclareLaunchArgument('drone_id', default_value=drone_id, description='Drone ID')
 
     # Ego Planner Node
@@ -116,23 +112,19 @@ def generate_launch_description():
             ('optimal_list', ['drone_', drone_id, '_plan_vis/optimal_list']),
             ('a_star_list', ['drone_', drone_id, '_plan_vis/a_star_list']),
             
-            # ('grid_map/odom', ['drone_', drone_id, '_', odometry_topic]),
             ('grid_map/odom', [odometry_topic]),
-            # ('grid_map/cloud', ['drone_', drone_id, '_', cloud_topic]),
             ('grid_map/cloud', [cloud_topic]),
-            ('grid_map/pose', ['drone_', drone_id, '_', camera_pose_topic]),
-            # ('grid_map/depth', ['drone_', drone_id, '_', depth_topic]),
-            ('grid_map/depth', [depth_topic]),
             ('grid_map/occupancy_inflate', ['drone_', drone_id, '_grid/grid_map/occupancy_inflate'])
-            # ('/move_base_simple/goal', ['/goal_pose'])
         ],
         parameters=[
             {"use_sim_time": use_sim_time},
             {"planning_frame": planning_frame},
+            {'fsm/wait_for_stable_px4': wait_for_stable_px4},
             {'fsm/flight_type': flight_type},
             {'fsm/thresh_replan_time': 1.0},
             {'fsm/thresh_no_replan_meter': 1.0},
-            {'fsm/goal_tolerance_m': 0.15},
+            {'fsm/goal_tolerance_m': goal_tolerance},
+            {'fsm/goal_speed_tolerance_mps': 0.20},
             {'fsm/replan_retry_interval': 0.25},
             {'fsm/planning_horizon': planning_horizon},
             {'fsm/planning_horizen_time': 3.0},
@@ -170,45 +162,32 @@ def generate_launch_description():
             # Keep the LiDAR hit map stable across sparse world-cloud scans.
             {'grid_map/cloud_voxel_retention_sec': 4.0},
             {'grid_map/local_map_margin': 10},
-            {'grid_map/ground_height': -0.01},
-            # camera parameter
-            {'grid_map/cx': cx},
-            {'grid_map/cy': cy},
-            {'grid_map/fx': fx},
-            {'grid_map/fy': fy},
-            # depth filter
-            {'grid_map/use_depth_filter': False},
-            {'grid_map/depth_filter_tolerance': 0.15},
-            {'grid_map/depth_filter_maxdist': 5.0},
-            {'grid_map/depth_filter_mindist': 0.2},
-            {'grid_map/depth_filter_margin': 2},
-            {'grid_map/k_depth_scaling_factor': 1000.0},
-            {'grid_map/skip_pixel': 2},
+            # Leave enough vertical margin for FAST-LIO/PX4 ground and reset
+            # offsets while the controller enforces the airborne flight floor.
+            {'grid_map/ground_height': -0.15},
+            {'grid_map/min_flight_height': min_flight_height},
             # local fusion
             {'grid_map/p_hit': 0.65},
             {'grid_map/p_miss': 0.35},
             {'grid_map/p_min': 0.12},
             {'grid_map/p_max': 0.90},
             {'grid_map/p_occ': 0.80},
-            {'grid_map/min_ray_length': 0.1},
-            {'grid_map/max_ray_length': 4.5},
             
-            {'grid_map/virtual_ceil_height': 2.9},
-            {'grid_map/visualization_truncate_height': 2.8},
+            {'grid_map/virtual_ceil_height': 9.9},
+            {'grid_map/visualization_truncate_height': 9.9},
             {'grid_map/show_occ_time': False},
-            {'grid_map/pose_type': 2},
             {'grid_map/frame_id': planning_frame},
             # planner manager
             {'manager/max_vel': max_vel},
             {'manager/max_acc': max_acc},
-            {'manager/max_jerk': 4.0},
+            {'manager/max_jerk': max_jerk},
             {'manager/control_points_distance': 0.4},
             {'manager/feasibility_tolerance': 0.05},
             {'manager/planning_horizon': planning_horizon},
             {'manager/use_distinctive_trajs': use_distinctive_trajs},
             {'manager/drone_id': drone_id},
             # Trajectory optimization parameters
-            {'optimization/lambda_smooth': 1.0},
+            {'optimization/lambda_smooth': lambda_smooth},
             {'optimization/lambda_collision': 1.0},
             {'optimization/lambda_feasibility': 0.1},
             {'optimization/lambda_fitness': 1.0},
@@ -216,16 +195,13 @@ def generate_launch_description():
             {'optimization/swarm_clearance': collision_clearance},
             {'optimization/max_vel': max_vel},
             {'optimization/max_acc': max_acc},
+            {'optimization/max_jerk': max_jerk},
 
             # B-Spline parameters
             {'bspline/limit_vel': max_vel},
             {'bspline/limit_acc': max_acc},
             {'bspline/limit_ratio': 1.1},
 
-            # Object prediction parameters
-            {'prediction/obj_num': obj_num_set},
-            {'prediction/lambda': 1.0},
-            {'prediction/predict_rate': 1.0}
         ]
     )
 
@@ -237,18 +213,16 @@ def generate_launch_description():
     ld.add_action(map_size_y_arg)
     ld.add_action(map_size_z_arg)
     ld.add_action(odometry_topic_arg)
-    ld.add_action(camera_pose_topic_arg)
-    ld.add_action(depth_topic_arg)
     ld.add_action(cloud_topic_arg)
-    ld.add_action(cx_arg)
-    ld.add_action(cy_arg)
-    ld.add_action(fx_arg)
-    ld.add_action(fy_arg)
     ld.add_action(max_vel_arg)
     ld.add_action(max_acc_arg)
+    ld.add_action(max_jerk_arg)
+    ld.add_action(lambda_smooth_arg)
     ld.add_action(planning_horizon_arg)
     ld.add_action(obstacle_inflation_arg)
     ld.add_action(collision_clearance_arg)
+    ld.add_action(min_flight_height_arg)
+    ld.add_action(goal_tolerance_arg)
     
     ld.add_action(point_num_arg)
     ld.add_action(point0_x_arg)
@@ -269,13 +243,15 @@ def generate_launch_description():
     
     ld.add_action(flight_type_arg)
     ld.add_action(use_distinctive_trajs_arg)
-    ld.add_action(obj_num_set_arg)
     ld.add_action(drone_id_arg)
 
 
     # Add Node
     ld.add_action(DeclareLaunchArgument("use_sim_time", default_value="false"))
     ld.add_action(DeclareLaunchArgument("planning_frame", default_value="world"))
+    ld.add_action(DeclareLaunchArgument(
+        'wait_for_stable_px4', default_value=wait_for_stable_px4,
+        description='Queue manual EGO goals until px4ctrl reports stable tracking'))
     ld.add_action(ego_planner_node)
 
     return ld

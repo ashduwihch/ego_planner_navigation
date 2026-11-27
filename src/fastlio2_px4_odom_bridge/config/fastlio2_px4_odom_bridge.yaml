@@ -6,8 +6,9 @@ fastlio2_px4_odom_bridge:
     emergency_stop_topic: /planning/emergency_stop
     input_frame: lidar
     reject_frame_mismatch: true
-    # Timestamp external odometry with PX4's own local-position clock.
-    px4_local_position_topic: /fmu/out/vehicle_local_position
+    # Use PX4 local-position time to establish the PX4/ROS clock offset, while
+    # preserving FAST-LIO's sample time in VehicleOdometry.timestamp_sample.
+    px4_local_position_topic: /fmu/out/vehicle_local_position_v1
     position_variance_floor: 0.01
     orientation_variance_floor: 0.01
     velocity_variance_floor: 0.04
@@ -16,7 +17,12 @@ fastlio2_px4_odom_bridge:
     max_vertical_position_m: 8.0
     max_position_step_slack_m: 0.35
     max_position_velocity_residual_m: 0.25
+    # PGO loop closure can move the absolute pose by a bounded amount. Such a
+    # correction is sent to PX4 as a VehicleOdometry reset instead of an
+    # emergency stop. Larger jumps remain a hard safety fault.
+    max_pose_reset_jump_m: 1.50
     max_sample_interval_sec: 0.75
+    max_sample_age_sec: 0.75
     max_attitude_step_rad: 1.3
     # Existing planner bridge convention: PX4 NED = [lidar_y, lidar_x, -lidar_z].
     transform_translation: [0.0, 0.0, 0.0]
@@ -30,3 +36,4 @@ fastlio2_px4_odom_bridge:
       1.0, 0.0, 0.0,
       0.0, -1.0, 0.0,
       0.0, 0.0, -1.0]
+    align_to_px4_local_origin: true

@@ -15,12 +15,8 @@ find_package(ament_cmake REQUIRED)
 set(dependencies
         rclcpp
         std_msgs
-        visualization_msgs
-        geometry_msgs
         nav_msgs
-        cv_bridge
-        message_filters
-        OpenCV
+        sensor_msgs
         Eigen3
         PCL
         pcl_conversions
@@ -33,13 +29,10 @@ endforeach ()
 # Plan_env Library
 add_library(${PROJECT_NAME} SHARED
         src/library/grid_map.cpp
-        src/library/raycast.cpp
-        src/library/obj_predictor.cpp
 )
 target_include_directories(${PROJECT_NAME} PUBLIC
         ${Eigen3_INCLUDE_DIRS}
         ${PCL_INCLUDE_DIRS}
-        ${OpenCV_INCLUDE_DIRS}
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
         "$<INSTALL_INTERFACE:include/${PROJECT_NAME}>")
 ament_target_dependencies(
@@ -47,26 +40,11 @@ ament_target_dependencies(
         ${dependencies}
 )
 
-# Obj_generator node
-add_executable(obj_generator
-        src/obj_generator.cpp
-)
-ament_target_dependencies(
-        obj_generator
-        ${dependencies}
-)
-target_link_libraries(obj_generator ${PROJECT_NAME})
-
 
 install(
         TARGETS plan_env
         EXPORT export_${PROJECT_NAME}
         DESTINATION lib
-)
-
-install(
-        TARGETS obj_generator
-        DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
