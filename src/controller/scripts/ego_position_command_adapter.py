@@ -53,7 +53,8 @@ class EgoPositionCommandAdapter(Node):
         self.publisher = self.create_publisher(
             DesiredState, self.get_parameter('desired_state_topic').value, 20)
         self.status_pub = self.create_publisher(
-            String, self.get_parameter('status_topic').value, 10)
+            String, self.get_parameter('status_topic').value,
+            rclpy.qos.QoSProfile(depth=1, durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(
             Odometry, self.get_parameter('odom_topic').value, self.odom_callback, 20)
         px4_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)

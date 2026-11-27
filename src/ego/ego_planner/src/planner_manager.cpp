@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <limits>
 
 namespace ego_planner
 {
@@ -354,8 +355,9 @@ namespace ego_planner
             bspline_optimizer_->ref_pts_ = samples;
 
             const double initial_scale = scale;
+            constexpr int kRetimingAttempts = 6;
             double fitted_dt = ts * scale * 1.03;
-            for (int attempt = 0; attempt < 6 && !feasible; ++attempt)
+            for (int attempt = 0; attempt < kRetimingAttempts && !feasible; ++attempt)
             {
                 Eigen::MatrixXd controls;
                 if (!UniformBspline::parameterizeToBspline(fitted_dt, samples, start_end_derivatives, controls))
@@ -364,19 +366,43 @@ namespace ego_planner
                 if (bspline_optimizer_->BsplineOptimizeTrajRefine(controls, fitted_dt, optimized_controls))
                 {
                     UniformBspline refined(optimized_controls, 3, fitted_dt);
-                    if (dynamically_feasible(refined, scale) && collisionFree(refined, pp_.max_vel_))
+                    const bool refined_dynamic = dynamically_feasible(refined, scale);
+                    Eigen::Vector3d refined_blocked = Eigen::Vector3d::Constant(
+                        std::numeric_limits<double>::quiet_NaN());
+                    const bool refined_clear = refined_dynamic &&
+                        collisionFree(refined, pp_.max_vel_, &refined_blocked);
+                    if (refined_dynamic && refined_clear)
                     {
                         pos = std::move(refined);
                         feasible = true;
+                    }
+                    else if (refined_blocked.allFinite())
+                    {
+                        RCLCPP_INFO(rclcpp::get_logger("EGOPlannerManager"),
+                            "Retimed spline attempt %d/%d collides at [%.3f %.3f %.3f]",
+                            attempt + 1, kRetimingAttempts, refined_blocked.x(),
+                            refined_blocked.y(), refined_blocked.z());
                     }
                 }
                 if (!feasible)
                 {
                     UniformBspline fitted(controls, 3, fitted_dt);
-                    if (dynamically_feasible(fitted, scale) && collisionFree(fitted, pp_.max_vel_))
+                    const bool fitted_dynamic = dynamically_feasible(fitted, scale);
+                    Eigen::Vector3d fitted_blocked = Eigen::Vector3d::Constant(
+                        std::numeric_limits<double>::quiet_NaN());
+                    const bool fitted_clear = fitted_dynamic &&
+                        collisionFree(fitted, pp_.max_vel_, &fitted_blocked);
+                    if (fitted_dynamic && fitted_clear)
                     {
                         pos = std::move(fitted);
                         feasible = true;
+                    }
+                    else if (fitted_blocked.allFinite())
+                    {
+                        RCLCPP_INFO(rclcpp::get_logger("EGOPlannerManager"),
+                            "Retimed fitted spline attempt %d/%d collides at [%.3f %.3f %.3f]",
+                            attempt + 1, kRetimingAttempts, fitted_blocked.x(),
+                            fitted_blocked.y(), fitted_blocked.z());
                     }
                 }
                 if (feasible)
@@ -389,8 +415,24 @@ namespace ego_planner
                     break;
             }
         }
-        if (!feasible || !collisionFree(pos, pp_.max_vel_))
+        Eigen::Vector3d first_collision_rejection = Eigen::Vector3d::Constant(
+            std::numeric_limits<double>::quiet_NaN());
+        const bool collision_clear = feasible &&
+            collisionFree(pos, pp_.max_vel_, &first_collision_rejection);
+        if (!feasible || !collision_clear)
         {
+            if (feasible && first_collision_rejection.allFinite())
+            {
+                const bool rejection_in_map = grid_map_->isInMap(first_collision_rejection);
+                const int rejection_occupancy = rejection_in_map ?
+                    grid_map_->getInflateOccupancy(first_collision_rejection) : -1;
+                RCLCPP_WARN(rclcpp::get_logger("EGOPlannerManager"),
+                    "Rejecting final spline at first blocked sample [%.3f %.3f %.3f], "
+                    "in_map=%s inflate_occupancy=%d",
+                    first_collision_rejection.x(), first_collision_rejection.y(),
+                    first_collision_rejection.z(), rejection_in_map ? "true" : "false",
+                    rejection_occupancy);
+            }
             RCLCPP_WARN(rclcpp::get_logger("EGOPlannerManager"),
                         "Rejecting final spline: %s",
                         feasible ? "inflated occupancy or map bounds" : "no fit met the dynamic and occupancy limits");
@@ -634,7 +676,8 @@ namespace ego_planner
         return true;
     }
 
-    bool EGOPlannerManager::collisionFree(UniformBspline& spline, double speed_bound)
+    bool EGOPlannerManager::collisionFree(UniformBspline& spline, double speed_bound,
+                                               Eigen::Vector3d* first_rejection)
     {
         const double duration = spline.getTimeSum();
         const double resolution = grid_map_->getResolution();
@@ -649,7 +692,10 @@ namespace ego_planner
         {
             const Eigen::Vector3d point = spline.evaluateDeBoorT(duration * i / intervals);
             if (!point.allFinite() || grid_map_->getInflateOccupancy(point) != 0)
+            {
+                if (first_rejection) *first_rejection = point;
                 return false;
+            }
         }
         return true;
     }

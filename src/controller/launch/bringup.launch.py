@@ -72,7 +72,7 @@ def generate_launch_description():
                               description='Set false if MicroXRCEAgent is already running'),
         DeclareLaunchArgument('agent_port', default_value='8888'),
         DeclareLaunchArgument('start_odom_bridge', default_value='true'),
-        DeclareLaunchArgument('start_rviz', default_value='false'),
+        DeclareLaunchArgument('start_rviz', default_value='true'),
         DeclareLaunchArgument('start_takeoff', default_value='true'),
         DeclareLaunchArgument('start_global_route', default_value='true',
                               description='Plan RViz/manual goals through the static world map'),
@@ -89,7 +89,7 @@ def generate_launch_description():
         DeclareLaunchArgument('odom_bridge_params',
                               default_value=os.path.join(
                                   bridge_share, 'config', 'fastlio2_px4_odom_bridge.yaml')),
-        DeclareLaunchArgument('ego_max_vel', default_value='1.5'),
+        DeclareLaunchArgument('ego_max_vel', default_value='1.0'),
         DeclareLaunchArgument('ego_max_acc', default_value='1.5'),
         DeclareLaunchArgument('ego_max_jerk', default_value='4.0'),
         DeclareLaunchArgument('ego_lambda_smooth', default_value='2.0'),

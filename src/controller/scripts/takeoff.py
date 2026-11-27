@@ -11,7 +11,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
-from controller.msg import DesiredState
+from controller.msg import ControlDebug, DesiredState
 
 
 class Takeoff(Node):
@@ -31,12 +31,14 @@ class Takeoff(Node):
         self.ev_fusion_active = False
         self.ev_flags_received_at = None
         self.ev_fusion_ready_since = None
+        self.controller_debug = None
         self.publisher = self.create_publisher(DesiredState, '/controller/desired_state', 10)
         self.create_subscription(
             VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
             self.position_callback,
             QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT))
         self.create_subscription(String, '/px4ctrl/status', self.status_callback, 10)
+        self.create_subscription(ControlDebug, '/px4ctrl/debug', self.debug_callback, 10)
         self.create_subscription(
             EstimatorStatusFlags, '/fmu/out/estimator_status_flags',
             self.estimator_status_callback,
@@ -56,6 +58,9 @@ class Takeoff(Node):
 
     def status_callback(self, msg):
         self.status = msg.data
+
+    def debug_callback(self, msg):
+        self.controller_debug = msg
 
     def estimator_status_callback(self, msg):
         now = self.get_clock().now()
@@ -141,9 +146,19 @@ def main(args=None):
             if node.stable_since is not None and time.monotonic() - node.stable_since >= 0.8:
                 print(f'PX4Ctrl takeoff complete: climbed {options.altitude:g} m and settled.')
                 return 0
+        p = node.local_position
+        position_report = ('unavailable' if p is None else
+                           f'z={p.z:.3f} m, vz={p.vz:.3f} m/s')
+        debug = node.controller_debug
+        debug_report = ('unavailable' if debug is None else
+                        f'state={debug.state}, armed={debug.armed}, offboard={debug.offboard}, '
+                        f'local_valid={debug.local_valid}, failsafe={debug.failsafe}, '
+                        f'thrust={debug.thrust:.3f}, tilt={debug.tilt_deg:.1f} deg, '
+                        f'command_age={debug.command_age_sec:.3f} s')
         raise RuntimeError(
             f'takeoff did not settle before timeout; last status: {node.status}; '
-            f'EV fusion active: {node.ev_fusion_active}')
+            f'EV fusion active: {node.ev_fusion_active}; PX4 position: {position_report}; '
+            f'controller debug: {debug_report}')
     finally:
         node.destroy_node()
         rclpy.try_shutdown()

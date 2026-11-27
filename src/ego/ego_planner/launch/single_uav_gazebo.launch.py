@@ -60,13 +60,14 @@ def generate_launch_description():
     return LaunchDescription([
         *[DeclareLaunchArgument(name, default_value=value) for name, value in args.items()],
         advanced,
-        # FAST-LIO publishes lidar -> body. The simulated IMU is the body frame,
-        # mounted 0.08 m above base_link and rotated pi about its z axis.
+        # The MID-360 is physically mounted at yaw pi, but the simulator plugin
+        # applies output_yaw=pi to both ROS cloud and IMU. FAST-LIO's body frame
+        # therefore already aligns with X500 base_link; only the 0.08 m offset remains.
         Node(
             package='tf2_ros', executable='static_transform_publisher',
             name='mid360_body_to_base_link',
             arguments=['--x', '0', '--y', '0', '--z', '-0.08',
-                       '--yaw', '3.141592653589793', '--pitch', '0', '--roll', '0',
+                       '--yaw', '0', '--pitch', '0', '--roll', '0',
                        '--frame-id', 'body', '--child-frame-id', 'base_link'],
             parameters=[{'use_sim_time': cfg['use_sim_time']}],
         ),
@@ -84,8 +85,8 @@ def generate_launch_description():
                 ('planning/bspline', ['drone_', cfg['drone_id'], '_planning/bspline']),
             ],
             parameters=[{'traj_server/time_forward': 1.0,
-                         # The MID-360/IMU axes are pi radians from base_link.
-                         'traj_server/initial_yaw': 3.141592653589793,
+                         # ROS sensor axes are plugin-corrected into base_link.
+                         'traj_server/initial_yaw': 0.0,
                          'use_sim_time': cfg['use_sim_time'],
                          'planning_frame': cfg['planning_frame']}],
         ),

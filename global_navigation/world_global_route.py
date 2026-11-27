@@ -28,16 +28,28 @@ UPPER = np.array([50.0, 50.0, 2.90])
 EGO_VOXEL_RESOLUTION = 0.10
 EGO_MAP_ORIGIN = np.array([-40.0, -40.0, -0.01])
 CLEARANCE = VEHICLE_RADIUS_M + SAFETY_MARGIN_M
-REQUIRED_CLEARANCE = CLEARANCE + POINT_CLOUD_SURFACE_ERROR_M
-EGO_MIN = np.array([-39.5, -39.5, 0.10])
+# EGO optimization uses a 0.65 m collision-clearance target. Match global
+# segment certification to that controller-side planning envelope so the
+# global layer does not hand EGO a geometrically shorter but locally infeasible
+# straight leg. Keep goal certification tied to the physical vehicle envelope.
+REQUIRED_CLEARANCE = max(CLEARANCE + POINT_CLOUD_SURFACE_ERROR_M, 0.65)
+# EGO rejects centers below its configured 0.25 m flight floor; retain a
+# margin so voxel rounding/ground returns cannot hand it a boundary waypoint.
+EGO_MIN = np.array([-39.5, -39.5, 0.35])
 EGO_MAX = np.array([39.5, 39.5, 2.65])
 BLOCKED_REPLAN_DELAY = 2.0
 GOAL_PROGRESS_STEP = 0.15
 GOAL_ARRIVAL_TOLERANCE_M = 0.20
+GOAL_REQUIRED_CLEARANCE = CLEARANCE + POINT_CLOUD_SURFACE_ERROR_M + GOAL_ARRIVAL_TOLERANCE_M
 STALLED_SPEED = 0.15
+ROUTE_HANDOFF_MAX_SPEED = 0.20
 MAX_NO_PROGRESS_TIME = 6.0
 MAX_EXPANDED_VOXELS = 300_000
 MAX_SEARCH_SECONDS = 10.0
+# Transit legs between elevated inspection positions must not dip to the
+# ground-adjacent A* lattice layers: EGO inflates ground returns by vehicle
+# radius and cannot safely execute those nominally free global waypoints.
+MIN_ELEVATED_TRANSIT_Z_M = 0.85
 
 
 def should_replan_blocked_route(now, blocked_since, last_progress,
@@ -208,8 +220,7 @@ class StaticGrid:
         """Certify a goal even if arrival is declared within its tolerance."""
         return (self.index(point) is not None and
                 not self.live_blocked(point) and
-                self.static_clearance_sq(point) >
-                (REQUIRED_CLEARANCE + GOAL_ARRIVAL_TOLERANCE_M) ** 2)
+                self.static_clearance_sq(point) > GOAL_REQUIRED_CLEARANCE ** 2)
 
     def replace_live_occupancy(self, lidar_points, world_to_lidar):
         points = np.asarray(lidar_points, dtype=float)
@@ -349,7 +360,7 @@ class StaticGrid:
         self._static_edge_free[key] = result
         return result
 
-    def route(self, start, goal, world_to_lidar=None):
+    def route(self, start, goal, world_to_lidar=None, transit_floor=None):
         started = time.perf_counter()
         deadline = started + MAX_SEARCH_SECONDS
         self.last_route_stats = None
@@ -373,9 +384,12 @@ class StaticGrid:
                 raise ValueError('global search exceeded time budget')
             lower = np.maximum(LOWER, np.minimum(start, goal) - margin)
             upper = np.minimum(UPPER, np.maximum(start, goal) + margin)
+            # transit_floor is supplied only for the dedicated return-to-home
+            # approach leg; ordinary inspection legs keep their validated route.
             for pitch in (COARSE_RESOLUTION, RESOLUTION):
                 route, count = self.search_route(
-                    start, goal, pitch, world_to_lidar, (lower, upper), deadline)
+                    start, goal, pitch, world_to_lidar, (lower, upper), deadline,
+                    transit_floor)
                 total_expanded += count
                 if route is not None:
                     if pitch != RESOLUTION:
@@ -430,7 +444,7 @@ class StaticGrid:
         return result
 
     def search_route(self, start, goal, pitch, world_to_lidar=None,
-                     bounds=None, deadline=None):
+                     bounds=None, deadline=None, transit_floor=None):
         """Search a six-connected grid inside a gradually expanded local region."""
         s, g = self.search_index(start, pitch), self.search_index(goal, pitch)
         if s == g:
@@ -457,6 +471,8 @@ class StaticGrid:
                         not self.search_free(neighbor, pitch)):
                     continue
                 centre = self.search_center(neighbor, pitch)
+                if transit_floor is not None and centre[2] < transit_floor:
+                    continue
                 edge_is_free = (self.edge_free(point, centre, world_to_lidar)
                                 if leaving else
                                 self.edge_free(centre, point, world_to_lidar))
@@ -493,6 +509,9 @@ class StaticGrid:
                     continue
                 departure = start if node == s else self.search_center(node, pitch)
                 arrival = goal if nxt == g else self.search_center(nxt, pitch)
+                if (transit_floor is not None and nxt != g and
+                        arrival[2] < transit_floor):
+                    continue
                 if world_to_lidar is not None:
                     q = transform(world_to_lidar, arrival)
                     if np.any(q < EGO_MIN) or np.any(q >= EGO_MAX): continue
@@ -553,6 +572,7 @@ def ros_node(grid):
             self.tf_listener = TransformListener(self.tf_buffer, self)
             self.gz = GazeboNode()
             self.gz_pose = None
+            self.home_world_xy = None
             self.gz_receipt = 0.0
             self.odom = None
             self.world_to_lidar = None
@@ -620,6 +640,8 @@ def ros_node(grid):
                                    (p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w))
             # Gazebo reports the base link pose relative to the model.
             self.gz_pose = to_matrix(models[0]) @ to_matrix(bases[0])
+            if self.home_world_xy is None:
+                self.home_world_xy = self.gz_pose[:2, 3].copy()
             self.gz_receipt = time.monotonic()
 
         def on_odom(self, message):
@@ -887,7 +909,14 @@ def ros_node(grid):
             if self.pending_goal is not None:
                 try:
                     goal_world = transform(lidar_to_world, self.pending_goal)
-                    route = self.grid.route(current_world,goal_world,self.world_to_lidar)
+                    returning_to_home = (
+                        self.home_world_xy is not None and
+                        np.linalg.norm(goal_world[:2] - self.home_world_xy) <= 0.30 and
+                        goal_world[2] >= MIN_ELEVATED_TRANSIT_Z_M)
+                    route = self.grid.route(
+                        current_world, goal_world, self.world_to_lidar,
+                        transit_floor=(MIN_ELEVATED_TRANSIT_Z_M
+                                       if returning_to_home else None))
                 except ValueError as error:
                     self.show_selected_goal('REJECTED')
                     self.clear_handoff_checks()
@@ -917,16 +946,20 @@ def ros_node(grid):
                             f'搜索 {stats["expanded"]} 个网格；开始飞行')
             if not self.route_points or self.next_index >= len(self.route_points):
                 return
-            # Skip intermediate stops when the farther target is clear.
-            farther, checks = evaluate_handoff_candidates(
-                self.grid, current_world, self.route_points,
-                self.next_index, self.world_to_lidar)
-            if farther > self.next_index:
-                skipped = farther - self.next_index
-                self.next_index = farther
-                self.next_sent = False
-                self.report(f'前方路线已可安全直达，提前切换到途经点 '
-                            f'{farther}/{len(self.route_points)-1}；跳过 {skipped} 个中间点')
+            # Choose a collision-free handoff only before issuing a waypoint.
+            # Rechecking and replacing an already active EGO target every timer
+            # tick can cause mid-flight replans, a discontinuous final reference,
+            # and an infeasible short stop at the home approach.
+            checks = []
+            if not self.next_sent:
+                farther, checks = evaluate_handoff_candidates(
+                    self.grid, current_world, self.route_points,
+                    self.next_index, self.world_to_lidar)
+                if farther > self.next_index:
+                    skipped = farther - self.next_index
+                    self.next_index = farther
+                    self.report(f'前方路线已安全直达；本段起飞前跳过 '
+                                f'{skipped} 个中间点，目标 {farther}/{len(self.route_points)-1}')
             self.show_handoff_checks(current_world, checks)
             now = time.monotonic()
             target_blocked = not self.grid.point_free(
@@ -954,8 +987,15 @@ def ros_node(grid):
                         speed, self.last_replan_attempt)):
                     self.last_replan_attempt = now
                     try:
-                        route = self.grid.route(current_world, self.final_goal_world,
-                                                self.world_to_lidar)
+                        returning_to_home = (
+                            self.home_world_xy is not None and
+                            np.linalg.norm(self.final_goal_world[:2] -
+                                           self.home_world_xy) <= 0.30 and
+                            self.final_goal_world[2] >= MIN_ELEVATED_TRANSIT_Z_M)
+                        route = self.grid.route(
+                            current_world, self.final_goal_world, self.world_to_lidar,
+                            transit_floor=(MIN_ELEVATED_TRANSIT_Z_M
+                                           if returning_to_home else None))
                     except ValueError as error:
                         self.show_selected_goal('BLOCKED')
                         self.report(f'停滞后重算全局路线失败：{explain_route_error(error)}')
@@ -980,7 +1020,11 @@ def ros_node(grid):
             if not self.next_sent:
                 self.send_next()
                 return
-            if np.linalg.norm(current_world-self.route_points[self.next_index]) < GOAL_ARRIVAL_TOLERANCE_M:
+            velocity = self.odom.twist.twist.linear
+            speed = math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y +
+                              velocity.z * velocity.z)
+            if (np.linalg.norm(current_world-self.route_points[self.next_index]) <
+                    GOAL_ARRIVAL_TOLERANCE_M and speed <= ROUTE_HANDOFF_MAX_SPEED):
                 self.next_index += 1
                 self.next_sent = False
                 if self.next_index == len(self.route_points):

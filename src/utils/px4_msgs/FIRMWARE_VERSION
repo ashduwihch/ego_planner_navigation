@@ -1,3 +1,2 @@
-PX4-Autopilot commit: d835882ea376e693608196cc0bda68d1a77a5dc8
-Definitions copied from msg/*.msg, msg/versioned/*.msg and srv/*.srv.
-Run ego_ws/tools/sync_px4_messages.py to check against local firmware.
+PX4-Autopilot commit: c61b778e2dd6d1b958097bb62db6124cb1ddb36e
+Definitions compared against msg/*.msg, msg/versioned/*.msg and srv/*.srv.

@@ -76,7 +76,8 @@ namespace ego_planner
 
         void updateTrajInfo(const UniformBspline& position_traj, const rclcpp::Time time_now);
 
-        bool collisionFree(UniformBspline& spline, double speed_bound);
+        bool collisionFree(UniformBspline& spline, double speed_bound,
+                           Eigen::Vector3d* first_rejection = nullptr);
 
         // !SECTION stable
 

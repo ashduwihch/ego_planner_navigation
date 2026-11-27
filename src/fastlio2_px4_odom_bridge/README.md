@@ -51,7 +51,7 @@ Important assumptions and follow-up work:
   about X. Real hardware must use its measured IMU/body-to-FRD rotation.
 * The node rejects an odometry message unless `header.frame_id` is `lidar`.
   It does not use TF to silently transform data.
-* The bridge uses `/fmu/out/vehicle_local_position_v1` to estimate the constant
+* The bridge uses `/fmu/out/vehicle_local_position` to estimate the constant
   PX4/ROS clock offset. `VehicleOdometry.timestamp` is the current PX4 time and
   `timestamp_sample` preserves the mapped FAST-LIO sensor sample time. Keep the
   PX4 time source alive and verify the resulting delay and EV innovations for
