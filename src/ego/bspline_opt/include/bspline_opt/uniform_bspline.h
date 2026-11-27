@@ -25,7 +25,7 @@ namespace ego_planner
 
         Eigen::MatrixXd getDerivativeControlPoints();
 
-        double limit_vel_, limit_acc_, limit_ratio_, feasibility_tolerance_;
+        double limit_vel_, limit_acc_, limit_jerk_, limit_ratio_, feasibility_tolerance_;
         // physical limits and time adjustment ratio
 
     public:
@@ -60,15 +60,15 @@ namespace ego_planner
         // constraints
         // input : (K+2) points with boundary vel/acc; ts
         // output: (K+6) control_pts
-        static void parameterizeToBspline(const double& ts, const vector<Eigen::Vector3d>& point_set,
+        static bool parameterizeToBspline(const double& ts, const vector<Eigen::Vector3d>& point_set,
                                           const vector<Eigen::Vector3d>& start_end_derivative,
                                           Eigen::MatrixXd& ctrl_pts);
 
         /* check feasibility, adjust time */
 
-        void setPhysicalLimits(const double& vel, const double& acc, const double& tolerance);
+        void setPhysicalLimits(const double& vel, const double& acc, const double& jerk,
+                               const double& tolerance);
         bool checkFeasibility(double& ratio, bool show = false);
-        void lengthenTime(const double& ratio);
 
         /* for performance evaluation */
 

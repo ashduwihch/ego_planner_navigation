@@ -13,17 +13,17 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # find dependencies
 find_package(ament_cmake REQUIRED)
 set(dependencies
-        quadrotor_msgs
-        bspline_opt
-        plan_env
-        traj_utils
         rclcpp
-        std_msgs
-        nav_msgs
         geometry_msgs
+        nav_msgs
+        sensor_msgs
+        std_msgs
         visualization_msgs
-        Eigen3
-        PCL
+        quadrotor_msgs
+        plan_env
+        path_searching
+        traj_utils
+        bspline_opt
 )
 foreach (Dependency IN ITEMS ${dependencies})
     find_package(${Dependency} REQUIRED)

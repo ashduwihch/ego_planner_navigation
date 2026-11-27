@@ -16,6 +16,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "traj_utils/msg/data_disp.hpp"
 #include "std_msgs/msg/empty.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "ego_planner/planner_manager.h"
 #include "traj_utils/planning_visualization.h"
 
@@ -52,7 +53,7 @@ namespace ego_planner
 
         /* parameters */
         int target_type_; // 1 mannual select, 2 hard code
-        double no_replan_thresh_, replan_thresh_, goal_tolerance_;
+        double no_replan_thresh_, replan_thresh_, goal_tolerance_, goal_speed_tolerance_;
         double replan_retry_interval_{0.25};
         double odom_timeout_sec_{0.5};
         double odom_max_speed_mps_{5.0};
@@ -60,11 +61,13 @@ namespace ego_planner
         double waypoints_[50][3];
         int waypoint_num_, wp_id_;
         bool replan_from_odom_{false};
-        bool landing_active_{false};
         double planning_horizen_, planning_horizen_time_;
         double emergency_time_;
         bool flag_realworld_experiment_;
         bool enable_fail_safe_;
+        bool wait_for_stable_px4_{false};
+        bool px4_stable_seen_{false};
+        std::shared_ptr<const geometry_msgs::msg::PoseStamped> pending_waypoint_;
 
         /* planning data */
         bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_;
@@ -84,6 +87,7 @@ namespace ego_planner
         int current_wp_;
 
         bool flag_escape_emergency_;
+        int terminal_recovery_attempts_{0};
 
         /* ROS utils */
         rclcpp::Node::SharedPtr node_;
@@ -93,7 +97,7 @@ namespace ego_planner
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr waypoint_sub_;
         rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
         rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr emergency_sub_;
-        rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr mission_landing_sub_;
+        rclcpp::Subscription<std_msgs::msg::String>::SharedPtr px4_status_sub_;
         rclcpp::Subscription<traj_utils::msg::MultiBsplines>::SharedPtr swarm_trajs_sub_;
         rclcpp::Subscription<traj_utils::msg::Bspline>::SharedPtr broadcast_bspline_sub_;
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr trigger_sub_;
@@ -109,6 +113,10 @@ namespace ego_planner
         bool callEmergencyStop(Eigen::Vector3d stop_pos); // front-end and back-end method
         bool planFromGlobalTraj(int trial_times = 1);
         bool planFromCurrentTraj(int trial_times = 1);
+        // Publish a collision-free hold at the current estimate when a new
+        // trajectory cannot be validated. This keeps PX4Ctrl in a controlled
+        // hover and waits for a fresh goal instead of executing stale points.
+        void publishHoldTrajectory();
 
         /* return value: std::pair< Times of the same state be continuously called, current continuously called state > */
         void changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call);
@@ -123,15 +131,17 @@ namespace ego_planner
         void execFSMCallback();
         void checkCollisionCallback();
         void waypointCallback(const std::shared_ptr<const geometry_msgs::msg::PoseStamped>& msg);
+        void px4StatusCallback(const std::shared_ptr<const std_msgs::msg::String>& msg);
         void triggerCallback(const std::shared_ptr<const geometry_msgs::msg::PoseStamped>& msg);
         void odometryCallback(const std::shared_ptr<const nav_msgs::msg::Odometry>& msg);
         void externalEmergencyCallback(const std::shared_ptr<const std_msgs::msg::Empty>& msg);
-        void missionLandingCallback(const std::shared_ptr<const std_msgs::msg::Empty>& msg);
         void swarmTrajsCallback(const std::shared_ptr<const traj_utils::msg::MultiBsplines>& msg);
         void BroadcastBsplineCallback(const std::shared_ptr<const traj_utils::msg::Bspline>& msg);
 
         bool checkCollision();
         bool odometryFresh() const;
+        bool tryShortGoalTrajectory();
+        void publishLocalTrajectory();
         void publishSwarmTrajs(bool startup_pub);
 
     public:

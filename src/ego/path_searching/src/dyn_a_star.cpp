@@ -1,35 +1,30 @@
 #include "path_searching/dyn_a_star.h"
+#include <chrono>
 
 using namespace std;
 using namespace Eigen;
 
-AStar::~AStar()
-{
-    for (int i = 0; i < POOL_SIZE_(0); i++)
-        for (int j = 0; j < POOL_SIZE_(1); j++)
-            for (int k = 0; k < POOL_SIZE_(2); k++)
-                delete GridNodeMap_[i][j][k];
-}
-
 void AStar::initGridMap(GridMap::Ptr occ_map, const Vector3i pool_size)
 {
-    POOL_SIZE_ = pool_size;
-    CENTER_IDX_ = pool_size / 2;
+    if (!occ_map || (pool_size.array() <= 2).any())
+        throw std::invalid_argument("A* requires a map and pool dimensions greater than two");
 
-    GridNodeMap_ = new GridNodePtr**[POOL_SIZE_(0)];
-    for (int i = 0; i < POOL_SIZE_(0); i++)
+    std::size_t node_count = 1;
+    for (int axis = 0; axis < 3; ++axis)
     {
-        GridNodeMap_[i] = new GridNodePtr*[POOL_SIZE_(1)];
-        for (int j = 0; j < POOL_SIZE_(1); j++)
-        {
-            GridNodeMap_[i][j] = new GridNodePtr[POOL_SIZE_(2)];
-            for (int k = 0; k < POOL_SIZE_(2); k++)
-            {
-                GridNodeMap_[i][j][k] = new GridNode;
-            }
-        }
+        const auto dimension = static_cast<std::size_t>(pool_size(axis));
+        if (node_count > std::numeric_limits<std::size_t>::max() / dimension)
+            throw std::invalid_argument("A* node pool size overflows addressable memory");
+        node_count *= dimension;
     }
 
+    POOL_SIZE_ = pool_size;
+    CENTER_IDX_ = pool_size / 2;
+    grid_nodes_.clear();
+    grid_nodes_.resize(node_count);
+    gridPath_.clear();
+    openSet_ = decltype(openSet_){};
+    rounds_ = 0;
     grid_map_ = occ_map;
 }
 
@@ -153,7 +148,11 @@ bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector3d start_pt, Vector3d en
 
 bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_pt)
 {
-    rclcpp::Time time_1 = rclcpp::Clock().now();
+    gridPath_.clear();
+    if (!grid_map_ || !std::isfinite(step_size) || step_size <= 0.0 ||
+        !start_pt.allFinite() || !end_pt.allFinite())
+        return false;
+    const auto time_1 = std::chrono::steady_clock::now();
     ++rounds_;
 
     step_size_ = step_size;
@@ -170,11 +169,10 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
     // if ( start_pt(0) > -1 && start_pt(0) < 0 )
     //     cout << "start_pt=" << start_pt.transpose() << " end_pt=" << end_pt.transpose() << endl;
 
-    GridNodePtr startPtr = GridNodeMap_[start_idx(0)][start_idx(1)][start_idx(2)];
-    GridNodePtr endPtr = GridNodeMap_[end_idx(0)][end_idx(1)][end_idx(2)];
+    GridNodePtr startPtr = nodeAt(start_idx);
+    GridNodePtr endPtr = nodeAt(end_idx);
 
-    std::priority_queue<GridNodePtr, std::vector<GridNodePtr>, NodeComparator> empty;
-    openSet_.swap(empty);
+    openSet_ = {};
 
     GridNodePtr neighborPtr = nullptr;
     GridNodePtr current = nullptr;
@@ -185,7 +183,7 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
     startPtr->fScore = getHeu(startPtr, endPtr);
     startPtr->state = GridNode::OPENSET; //put start node in open set
     startPtr->cameFrom = nullptr;
-    openSet_.push(startPtr); //put start in open set
+    openSet_.push({startPtr, startPtr->fScore});
 
     endPtr->index = end_idx;
 
@@ -195,8 +193,11 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
     while (!openSet_.empty())
     {
         num_iter++;
-        current = openSet_.top();
+        const auto entry = openSet_.top();
         openSet_.pop();
+        current = entry.node;
+        if (current->state == GridNode::CLOSEDSET || entry.priority != current->fScore)
+            continue;
 
         // if ( num_iter < 10000 )
         //     cout << "current=" << current->index.transpose() << endl;
@@ -232,7 +233,7 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
                         continue;
                     }
 
-                    neighborPtr = GridNodeMap_[neighborIdx(0)][neighborIdx(1)][neighborIdx(2)];
+                    neighborPtr = nodeAt(neighborIdx);
                     neighborPtr->index = neighborIdx;
 
                     // Disallow diagonal corner cutting: every proper
@@ -281,7 +282,7 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
                         neighborPtr->cameFrom = current;
                         neighborPtr->gScore = tentative_gScore;
                         neighborPtr->fScore = tentative_gScore + getHeu(neighborPtr, endPtr);
-                        openSet_.push(neighborPtr); //put neighbor in open set and record it.
+                        openSet_.push({neighborPtr, neighborPtr->fScore});
                     }
                     else if (tentative_gScore < neighborPtr->gScore)
                     {
@@ -289,10 +290,10 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
                         neighborPtr->cameFrom = current;
                         neighborPtr->gScore = tentative_gScore;
                         neighborPtr->fScore = tentative_gScore + getHeu(neighborPtr, endPtr);
+                        openSet_.push({neighborPtr, neighborPtr->fScore});
                     }
                 }
-        rclcpp::Time time_2 = rclcpp::Clock().now();
-        if ((time_2 - time_1).seconds() > 0.2)
+        if (std::chrono::steady_clock::now() - time_1 > std::chrono::milliseconds(200))
         {
             RCLCPP_WARN(rclcpp::get_logger("AstarSearch"),
                         "Failed in A star path searching !!! 0.2 seconds time limit exceeded.");
@@ -300,11 +301,11 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
         }
     }
 
-    rclcpp::Time time_2 = rclcpp::Clock().now();
-
-    if ((time_2 - time_1).seconds() > 0.1)
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - time_1).count();
+    if (elapsed > 0.1)
         RCLCPP_WARN(rclcpp::get_logger("AstarSearch"),
-                "Time consume in A star path finding is %.3fs, iter=%d", (time_2 - time_1).seconds(), num_iter);
+                "Time consume in A star path finding is %.3fs, iter=%d", elapsed, num_iter);
 
     return false;
 }

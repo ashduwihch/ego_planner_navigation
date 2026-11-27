@@ -3,10 +3,12 @@
 
 #include <iostream>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <rclcpp/rclcpp.hpp>
 #include <plan_env/grid_map.h>
 #include <queue>
+#include <stdexcept>
 
 constexpr double inf = std::numeric_limits<double>::infinity();
 struct GridNode;
@@ -26,24 +28,38 @@ struct GridNode
     {
         UNDEFINED
     };
-    Eigen::Vector3i index;
+    Eigen::Vector3i index{Eigen::Vector3i::Zero()};
 
     double gScore{inf}, fScore{inf};
     GridNodePtr cameFrom{nullptr};
 };
 
-class NodeComparator
+struct OpenEntry
 {
-public:
-    bool operator()(GridNodePtr node1, GridNodePtr node2)
+    GridNodePtr node;
+    double priority;
+
+    bool operator<(const OpenEntry& other) const
     {
-        return node1->fScore > node2->fScore;
+        return priority > other.priority;
     }
 };
 
 class AStar
 {
     GridMap::Ptr grid_map_;
+
+    std::size_t nodeAddress(const Eigen::Vector3i& index) const
+    {
+        return (static_cast<std::size_t>(index.x()) * static_cast<std::size_t>(POOL_SIZE_.y()) +
+                static_cast<std::size_t>(index.y())) * static_cast<std::size_t>(POOL_SIZE_.z()) +
+               static_cast<std::size_t>(index.z());
+    }
+
+    GridNodePtr nodeAt(const Eigen::Vector3i& index)
+    {
+        return &grid_nodes_[nodeAddress(index)];
+    }
 
     inline void coord2gridIndexFast(double x, double y, double z, int& id_x, int& id_y, int& id_z);
 
@@ -64,15 +80,17 @@ class AStar
 
     std::vector<GridNodePtr> retrievePath(GridNodePtr current);
 
-    double step_size_, inv_step_size_;
-    Eigen::Vector3d center_;
-    Eigen::Vector3i CENTER_IDX_, POOL_SIZE_;
+    double step_size_{0.1}, inv_step_size_{10.0};
+    Eigen::Vector3d center_{Eigen::Vector3d::Zero()};
+    Eigen::Vector3i CENTER_IDX_{Eigen::Vector3i::Zero()}, POOL_SIZE_{Eigen::Vector3i::Zero()};
     const double tie_breaker_ = 1.0 + 1.0 / 10000;
 
     std::vector<GridNodePtr> gridPath_;
 
-    GridNodePtr*** GridNodeMap_;
-    std::priority_queue<GridNodePtr, std::vector<GridNodePtr>, NodeComparator> openSet_;
+    // A contiguous pool avoids one million individual allocations for the
+    // default 100^3 search volume and keeps node accesses cache-friendly.
+    std::vector<GridNode> grid_nodes_;
+    std::priority_queue<OpenEntry> openSet_;
 
     int rounds_{0};
 
@@ -80,7 +98,7 @@ public:
     typedef std::shared_ptr<AStar> Ptr;
 
     AStar() = default;
-    ~AStar();
+    ~AStar() = default;
 
     void initGridMap(GridMap::Ptr occ_map, Eigen::Vector3i pool_size);
 
@@ -103,16 +121,14 @@ inline bool AStar::Coord2Index(const Eigen::Vector3d& pt, Eigen::Vector3i& idx) 
 {
     if (!pt.allFinite() || !std::isfinite(step_size_) || step_size_ <= 0.0)
         return false;
-    idx = ((pt - center_) * inv_step_size_ + Eigen::Vector3d(0.5, 0.5, 0.5)).cast<int>() + CENTER_IDX_;
-
-    if (idx(0) < 0 || idx(0) >= POOL_SIZE_(0) || idx(1) < 0 || idx(1) >= POOL_SIZE_(1) || idx(2) < 0 || idx(2) >=
-        POOL_SIZE_(2))
+    const Eigen::Array3d cell = ((pt - center_).array() * inv_step_size_ + 0.5).floor()
+        + CENTER_IDX_.cast<double>().array();
+    if (!cell.allFinite() || (cell < 0).any() ||
+        (cell >= POOL_SIZE_.cast<double>().array()).any())
     {
-        RCLCPP_ERROR(rclcpp::get_logger("Coord2Index"), "Ran out of pool, index=%d %d %d, POOL_SIZE=%d %d %d", idx(0),
-                     idx(1), idx(2), POOL_SIZE_(0), POOL_SIZE_(1), POOL_SIZE_(2));
         return false;
     }
-
+    idx = cell.cast<int>().matrix();
     return true;
 };
 

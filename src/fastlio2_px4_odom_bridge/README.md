@@ -51,12 +51,14 @@ Important assumptions and follow-up work:
   about X. Real hardware must use its measured IMU/body-to-FRD rotation.
 * The node rejects an odometry message unless `header.frame_id` is `lidar`.
   It does not use TF to silently transform data.
-* The bridge stamps external odometry with the latest PX4 local-position time
-  received on `/fmu/out/vehicle_local_position_v1`. Keep that PX4 time source
-  alive and verify timestamps/EV innovations for the target firmware.
-* `transform_translation` is zero by default. This assumes the FAST-LIO local
-  origin and PX4 local NED origin have been aligned. A nonzero calibrated
-  translation is required when they are not aligned.
+* The bridge uses `/fmu/out/vehicle_local_position_v1` to estimate the constant
+  PX4/ROS clock offset. `VehicleOdometry.timestamp` is the current PX4 time and
+  `timestamp_sample` preserves the mapped FAST-LIO sensor sample time. Keep the
+  PX4 time source alive and verify the resulting delay and EV innovations for
+  the target firmware.
+* With `align_to_px4_local_origin: true` the bridge estimates translation once
+  at startup. With `false` it uses `transform_translation` verbatim, so supply
+  the calibrated NED offset when the origins differ.
 * Configure PX4 EKF2 external-vision fusion separately (`EKF2_EV_CTRL`, delay,
   sensor position, and height reference as appropriate for the PX4 version).
   Check `EstimatorStatus` flags `CS_EV_POS`, `CS_EV_VEL`, `CS_EV_HGT`, and

@@ -1,4 +1,3 @@
-#include <rclcpp/create_timer.hpp>
 #include "bspline_opt/uniform_bspline.h"
 #include "nav_msgs/msg/odometry.hpp"
 #include "traj_utils/msg/bspline.hpp"
@@ -7,9 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <optional>
 #include <stdexcept>
-#include <utility>
 
 rclcpp::Publisher<quadrotor_msgs::msg::PositionCommand>::SharedPtr pos_cmd_pub;
 
@@ -32,28 +29,8 @@ rclcpp::Time last_command_time_;
 // yaw control
 double last_yaw_{0.0}, last_yaw_dot_{0.0};
 double time_forward_{1.0};
-bool hold_current_yaw_{false};
-bool initial_yaw_captured_{false};
-std::optional<double> latest_odom_yaw_;
 
-void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
-{
-    if (msg->header.frame_id != planning_frame_)
-        return;
-    const auto& q = msg->pose.pose.orientation;
-    if (!std::isfinite(q.w) || !std::isfinite(q.x) ||
-        !std::isfinite(q.y) || !std::isfinite(q.z))
-        return;
-    const double norm = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
-    if (norm < 1e-6)
-        return;
-    const double w = q.w / norm, x = q.x / norm;
-    const double y = q.y / norm, z = q.z / norm;
-    latest_odom_yaw_ = std::atan2(2.0 * (w * z + x * y),
-                                  1.0 - 2.0 * (y * y + z * z));
-}
-
-void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
+void bsplineCallback(const traj_utils::msg::Bspline::SharedPtr msg)
 {
     constexpr int kOrder = 3;
     if (!msg || msg->order != kOrder || msg->pos_pts.size() < kOrder + 1 ||
@@ -63,12 +40,6 @@ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
                      [](double knot) { return std::isfinite(knot); }))
     {
         RCLCPP_WARN(rclcpp::get_logger("traj_server"), "Ignoring malformed EGO B-spline message");
-        return;
-    }
-    if (hold_current_yaw_ && !initial_yaw_captured_ && !latest_odom_yaw_)
-    {
-        RCLCPP_WARN(rclcpp::get_logger("traj_server"),
-                    "Waiting for current odometry yaw before accepting the first trajectory");
         return;
     }
     if (!std::all_of(msg->pos_pts.begin(), msg->pos_pts.end(), [](const auto& point) {
@@ -90,9 +61,12 @@ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
                      static_cast<long>(msg->traj_id), traj_id_);
         return;
     }
-    for (size_t i = 0; i < msg->pos_pts.size(); ++i)
+    for (size_t i = 0; i + 2 < msg->pos_pts.size(); ++i)
     {
-        if (msg->knots[i + msg->order + 1] <= msg->knots[i + 1])
+        // The acceleration spline divides by these spans after trimming the
+        // outer knots for the first derivative. Checking only velocity spans
+        // misses repeated interior knots that make acceleration undefined.
+        if (msg->knots[i + kOrder + 1] <= msg->knots[i + 2])
         {
             RCLCPP_WARN(rclcpp::get_logger("traj_server"), "Ignoring B-spline with degenerate derivative knot span");
             return;
@@ -102,6 +76,7 @@ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
     try
     {
     const rclcpp::Time candidate_start_time(msg->start_time, trajectory_clock_->get_clock_type());
+    if (candidate_start_time.nanoseconds() <= 0) return;
     Eigen::MatrixXd pos_pts(3, msg->pos_pts.size());
 
     Eigen::VectorXd knots(msg->knots.size());
@@ -141,13 +116,6 @@ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
     candidate_traj.push_back(candidate_traj[1].getDerivative());
 
     traj_ = std::move(candidate_traj);
-    if (hold_current_yaw_ && !initial_yaw_captured_)
-    {
-        last_yaw_ = *latest_odom_yaw_;
-        initial_yaw_captured_ = true;
-        RCLCPP_INFO(rclcpp::get_logger("traj_server"),
-                    "Holding current odometry yaw %.3f rad for navigation", last_yaw_);
-    }
     traj_duration_ = candidate_duration;
     start_time_ = candidate_start_time;
     traj_id_ = static_cast<int>(msg->traj_id);
@@ -216,10 +184,9 @@ void cmdCallback()
         vel = traj_[1].evaluateDeBoorT(t_cur);
         acc = traj_[2].evaluateDeBoorT(t_cur);
 
-        // EGO supplies a position path. In navigation mode, keep the measured
-        // heading from the first trajectory instead of turning into the path.
-        yaw_yawdot = hold_current_yaw_ ? std::make_pair(last_yaw_, 0.0) :
-            calculate_yaw(t_cur, pos, dt);
+        /*** calculate yaw ***/
+        yaw_yawdot = calculate_yaw(t_cur, pos, dt);
+        /*** calculate yaw ***/
 
         double tf = min(traj_duration_, t_cur + 2.0);
         pos_f = traj_[0].evaluateDeBoorT(tf);
@@ -282,12 +249,6 @@ int main(int argc, char** argv)
     auto node = rclcpp::Node::make_shared("traj_server");
     trajectory_clock_ = node->get_clock();
     planning_frame_ = node->declare_parameter<std::string>("planning_frame", "world");
-    hold_current_yaw_ = node->declare_parameter<bool>("traj_server/hold_current_yaw", false);
-    const auto odometry_topic = node->declare_parameter<std::string>(
-        "traj_server/odometry_topic", "/fastlio2/lio_odom");
-
-    auto odom_sub = node->create_subscription<nav_msgs::msg::Odometry>(
-        odometry_topic, rclcpp::QoS(10), odomCallback);
 
     auto bspline_sub = node->create_subscription<traj_utils::msg::Bspline>(
         "planning/bspline",
@@ -301,9 +262,9 @@ int main(int argc, char** argv)
     // Use the node/ROS clock because trajectory time is based on /clock when
     // running Gazebo with use_sim_time=true.  A wall timer publishes many
     // duplicate samples when the GUI lowers the simulation real-time factor.
-    auto cmd_timer = rclcpp::create_timer(
-        node, node->get_clock(), rclcpp::Duration::from_seconds(0.01),
-        []() { cmdCallback(); });
+    auto cmd_timer = node->create_timer(
+        std::chrono::milliseconds(10),
+        cmdCallback);
 
     /* control parameter */
     cmd.kx[0] = pos_gain[0];
